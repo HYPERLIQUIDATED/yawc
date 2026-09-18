@@ -192,7 +192,9 @@ where
             flush_sends: false,
             compression: negotiated.compression,
             deflate: None,
-            inflate: negotiated.decompressor(),
+            inflate: negotiated
+                .decompressor()
+                .map(|inflate| inflate.with_limit(negotiated.max_read_buffer.saturating_sub(1))),
         }
     }
 

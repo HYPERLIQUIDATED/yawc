@@ -521,6 +521,7 @@ fn chunk(output: &mut BytesMut) -> &mut [MaybeUninit<u8>] {
 pub struct Decompressor {
     inflate: Inflate,
     no_context_takeover: bool,
+    limit: usize,
 }
 
 impl Decompressor {
@@ -535,7 +536,14 @@ impl Decompressor {
                 None => Inflate::default(),
             },
             no_context_takeover: config.no_context_takeover,
+            limit: usize::MAX,
         }
+    }
+
+    pub(crate) fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self.inflate.remaining = limit;
+        self
     }
 
     /// Decompresses a compressed data frame.
@@ -545,8 +553,11 @@ impl Decompressor {
     /// no-context-takeover mode).
     pub fn decompress(&mut self, input: &[u8], stream_end: bool) -> io::Result<Bytes> {
         let res = self.inflate.decompress(input, stream_end);
-        if stream_end && self.no_context_takeover {
-            self.inflate.reset();
+        if stream_end {
+            self.inflate.remaining = self.limit;
+            if self.no_context_takeover {
+                self.inflate.reset();
+            }
         }
         res
     }
@@ -565,6 +576,7 @@ struct Inflate {
     /// Once that happens the inflater cannot consume any more input, so the remaining
     /// bytes are dropped and the context is reset before the next message.
     stream_ended: bool,
+    remaining: usize,
 }
 
 impl Default for Inflate {
@@ -574,6 +586,7 @@ impl Default for Inflate {
             output: BytesMut::with_capacity(1024),
             decompress: flate2::Decompress::new(false),
             stream_ended: false,
+            remaining: usize::MAX,
         }
     }
 }
@@ -595,6 +608,7 @@ impl Inflate {
             output: BytesMut::with_capacity(1024),
             decompress: flate2::Decompress::new_with_window_bits(false, window_bits),
             stream_ended: false,
+            remaining: usize::MAX,
         }
     }
 
@@ -638,7 +652,7 @@ impl Inflate {
         let mut stream_ended = false;
 
         while !input.is_empty() {
-            let dst = chunk(output);
+            let dst = inflate_chunk(output, self.remaining);
 
             let before_out = decompressor.total_out();
             let before_in = decompressor.total_in();
@@ -648,6 +662,7 @@ impl Inflate {
             let read = (decompressor.total_out() - before_out) as usize;
             let consumed = (decompressor.total_in() - before_in) as usize;
 
+            self.remaining = self.remaining.checked_sub(read).ok_or_else(inflate_limit)?;
             unsafe { output.advance_mut(read) };
 
             input = &input[consumed..];
@@ -688,7 +703,7 @@ impl Inflate {
         let output = &mut self.output;
         let decompressor = &mut self.decompress;
 
-        let dst = chunk(output);
+        let dst = inflate_chunk(output, self.remaining);
         let before_out = decompressor.total_out();
 
         decompressor
@@ -696,10 +711,14 @@ impl Inflate {
             .map_err(inflate_error)?;
 
         let written = (decompressor.total_out() - before_out) as usize;
+        self.remaining = self
+            .remaining
+            .checked_sub(written)
+            .ok_or_else(inflate_limit)?;
         unsafe { output.advance_mut(written) };
 
         loop {
-            let dst = chunk(output);
+            let dst = inflate_chunk(output, self.remaining);
 
             let before_out = decompressor.total_out();
             decompressor
@@ -711,11 +730,30 @@ impl Inflate {
             }
 
             let written = (decompressor.total_out() - before_out) as usize;
+            self.remaining = self
+                .remaining
+                .checked_sub(written)
+                .ok_or_else(inflate_limit)?;
             unsafe {
                 output.advance_mut(written);
             }
         }
     }
+}
+
+// One probe byte distinguishes an exact-size message from an overflow, including
+// output buffered until the final flush. The budget spans all message fragments.
+fn inflate_chunk(output: &mut BytesMut, remaining: usize) -> &mut [MaybeUninit<u8>] {
+    let dst = chunk(output);
+    let size = dst.len().min(remaining.saturating_add(1));
+    &mut dst[..size]
+}
+
+fn inflate_limit() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "decoded WebSocket message exceeds limit",
+    )
 }
 
 #[cfg(test)]

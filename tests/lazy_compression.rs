@@ -7,17 +7,20 @@ use std::{
 };
 
 use futures::SinkExt;
+use tokio::io::AsyncWriteExt;
 use yawc::{Frame, Options, Role, WebSocket};
 
 struct Counted;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 #[global_allocator]
 static ALLOCATOR: Counted = Counted;
 
 fn allocated(bytes: usize) {
-    LIVE.fetch_add(bytes, Ordering::Relaxed);
+    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK.fetch_max(live, Ordering::Relaxed);
 }
 
 // SAFETY: every operation delegates the original pointer/layout to System;
@@ -105,5 +108,41 @@ async fn control_frames_do_not_allocate_the_sender_but_first_data_send_works() {
         );
     }
 
-    println!("receive_state_bytes={receive_state} after_control_bytes={after_control}");
+    // A tiny wire payload that expands to 1 MiB must stop near the decoded limit.
+    let mut encoder = flate2::Compress::new(flate2::Compression::default(), false);
+    let mut compressed = vec![0; 8192];
+    encoder
+        .compress(
+            &vec![42; 1024 * 1024],
+            &mut compressed,
+            flate2::FlushCompress::Finish,
+        )
+        .unwrap();
+    assert_eq!(encoder.total_in(), 1024 * 1024);
+    compressed.truncate(usize::try_from(encoder.total_out()).unwrap());
+
+    let (socket, mut peer) = tokio::io::duplex(16 * 1024);
+    let mut limited = WebSocket::from_stream_with_extensions(
+        socket,
+        Role::Client,
+        extension,
+        Options::default()
+            .with_balanced_compression()
+            .with_max_read_buffer(1025),
+    )
+    .unwrap();
+    peer.write_all(&[0xc2, 126]).await.unwrap();
+    peer.write_all(&u16::try_from(compressed.len()).unwrap().to_be_bytes())
+        .await
+        .unwrap();
+    peer.write_all(&compressed).await.unwrap();
+
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let error = limited.next_frame().await.err().unwrap();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+    assert!(error.to_string().contains("exceeds limit"), "{error}");
+    assert!(peak < 128 * 1024, "bounded inflate peak: {peak}");
+
+    println!("receive_state_bytes={receive_state} after_control_bytes={after_control} bounded_inflate_peak_bytes={peak}");
 }
