@@ -468,6 +468,19 @@ impl Deflate {
                 output.truncate(output.len() - 4);
                 break;
             }
+
+            if written == 0 {
+                if output.is_empty() {
+                    // A repeated sync flush can emit nothing for an empty message.
+                    // Encode an empty stored block; the peer restores 00 00 ff ff.
+                    return Ok(Bytes::from_static(&[0]));
+                }
+
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "compression flush made no progress",
+                ));
+            }
         }
 
         Ok(output.split().freeze())
