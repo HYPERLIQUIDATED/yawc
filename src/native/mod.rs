@@ -150,7 +150,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use builder::WsBuilderOpts;
 use codec::Codec;
-use compression::{CompressionConfig, Compressor, Decompressor, WebSocketExtensions};
+use compression::{CompressionConfig, Decompressor, WebSocketExtensions};
 use futures::{task::AtomicWaker, SinkExt};
 #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
 use tokio_rustls::rustls::{self, pki_types::TrustAnchor};
@@ -269,10 +269,6 @@ impl Negotiation {
             fragmentation: options.fragmentation.clone(),
             max_backpressure_write_boundary: options.max_backpressure_write_boundary,
         })
-    }
-
-    pub(crate) fn compressor(&self) -> Option<Compressor> {
-        self.compression.as_ref().map(CompressionConfig::compressor)
     }
 
     pub(crate) fn decompressor(&self) -> Option<Decompressor> {

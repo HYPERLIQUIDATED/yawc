@@ -64,7 +64,7 @@ use tokio_util::codec::{Framed, FramedParts};
 
 use crate::{
     codec::Codec,
-    compression::{Compressor, Decompressor},
+    compression::{CompressionConfig, Compressor, Decompressor},
     native::{ContextKind, WakeProxy},
     Frame, ReadHalf, WebSocketError, WriteHalf,
 };
@@ -158,6 +158,8 @@ pub struct Streaming<S> {
     obligated_sends: VecDeque<Frame>,
     // flag to indicate the writer to flush sends
     flush_sends: bool,
+    // Allocate the sender only if an application data frame is actually sent.
+    compression: Option<CompressionConfig>,
     // compressor
     deflate: Option<Compressor>,
     // decompressor
@@ -188,7 +190,8 @@ where
             wake_proxy: Arc::new(WakeProxy::default()),
             obligated_sends: VecDeque::new(),
             flush_sends: false,
-            deflate: negotiated.compressor(),
+            compression: negotiated.compression,
+            deflate: None,
             inflate: negotiated.decompressor(),
         }
     }
@@ -414,6 +417,10 @@ where
 
         let should_compress = !item.opcode.is_control();
         if should_compress {
+            if this.deflate.is_none() {
+                this.deflate = this.compression.as_ref().map(CompressionConfig::compressor);
+            }
+
             if let Some(deflate) = this.deflate.as_mut() {
                 let output = deflate.compress(&item.payload, item.is_fin())?;
                 // Set the RSV1 bit only when we are not streaming
