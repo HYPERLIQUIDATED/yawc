@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, mem::MaybeUninit};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use flate2::{CompressError, DecompressError, FlushCompress, Status};
@@ -431,7 +431,7 @@ impl Deflate {
         let before_in = compressor.total_in();
 
         // partially flush the buffer
-        let status = compressor.compress(input, dst, flate2::FlushCompress::Partial);
+        let status = compressor.compress_uninit(input, dst, flate2::FlushCompress::Partial);
 
         let written = (compressor.total_out() - before_out) as usize;
         let consumed = (compressor.total_in() - before_in) as usize;
@@ -457,7 +457,7 @@ impl Deflate {
             let before_out = compressor.total_out();
 
             compressor
-                .compress(&[], dst, FlushCompress::Sync)
+                .compress_uninit(&[], dst, FlushCompress::Sync)
                 .map_err(deflate_error)?;
 
             let written = (compressor.total_out() - before_out) as usize;
@@ -505,14 +505,13 @@ fn inflate_error(err: DecompressError) -> io::Error {
 /// Returns a mutable slice to the next available chunk of memory in the BytesMut buffer.
 ///
 /// This function ensures that there's always at least 1024 bytes available in the returning byte slice.
-fn chunk(output: &mut BytesMut) -> &mut [u8] {
+fn chunk(output: &mut BytesMut) -> &mut [MaybeUninit<u8>] {
     // always ensure there's 1024 bytes available
     if output.capacity() - output.len() < 1024 {
         output.reserve(1024);
     }
 
-    let uninitbuf = output.spare_capacity_mut();
-    unsafe { &mut *(uninitbuf as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) }
+    output.spare_capacity_mut()
 }
 
 /// Decompresses WebSocket payloads compressed with permessage-deflate.
@@ -644,7 +643,7 @@ impl Inflate {
             let before_out = decompressor.total_out();
             let before_in = decompressor.total_in();
 
-            let status = decompressor.decompress(input, dst, flate2::FlushDecompress::None);
+            let status = decompressor.decompress_uninit(input, dst, flate2::FlushDecompress::None);
 
             let read = (decompressor.total_out() - before_out) as usize;
             let consumed = (decompressor.total_in() - before_in) as usize;
@@ -693,7 +692,7 @@ impl Inflate {
         let before_out = decompressor.total_out();
 
         decompressor
-            .decompress(&[], dst, flate2::FlushDecompress::Sync)
+            .decompress_uninit(&[], dst, flate2::FlushDecompress::Sync)
             .map_err(inflate_error)?;
 
         let written = (decompressor.total_out() - before_out) as usize;
@@ -704,7 +703,7 @@ impl Inflate {
 
             let before_out = decompressor.total_out();
             decompressor
-                .decompress(&[], dst, flate2::FlushDecompress::None)
+                .decompress_uninit(&[], dst, flate2::FlushDecompress::None)
                 .map_err(inflate_error)?;
 
             if before_out == decompressor.total_out() {
